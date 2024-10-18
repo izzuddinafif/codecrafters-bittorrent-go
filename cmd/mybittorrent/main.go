@@ -44,10 +44,16 @@ func decodeNext(b string, i int, v *[]interface{}) (int, error) {
 	if i+1 >= len(b) {
 		return i, nil
 	} // exit condition
+	remaining := b[i+1:]
+	if !isValidBencodeCharacter(remaining[0]) {
+		return i, fmt.Errorf("extra data after valid bencoded structure: %q", remaining[0])
+	}
 
 	return decode(b, i+1, v)
 }
-
+func isValidBencodeCharacter(ch byte) bool {
+	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
+}
 func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 	i = st + 1
 	if i == len(b) {
@@ -75,23 +81,24 @@ func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 }
 
 func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
-	c := strings.Index(b[st:], ":")
-	c += st // catch up with previous string (if exists)
+	s := b[st:]
+	c := strings.Index(s, ":")
+	// c += st // catch up with previous string (if exists)
 	if c == -1 {
 		return st, fmt.Errorf("malformed string encoding")
 	}
-	n, err := strconv.Atoi(b[st:c])
+	n, err := strconv.Atoi(s[:c])
 	if err != nil {
 		return st, err
 	}
-	if len(b[c+1:c+n]) >= n {
-		return st, fmt.Errorf("string length mismatch")
+	if len(s) < c+1+n {
+		return st, fmt.Errorf("string length mismatch or out of bounds")
 	}
 	ind := c + 1 // exclude :
-	s := b[ind : ind+n]
-	*v = append(*v, s)
-	//fmt.Println("append string:", s)
-	length := c + n
+	str := s[ind : ind+n]
+	*v = append(*v, str)
+	//fmt.Println("append string:", str)
+	length := c + n + st
 	return length, nil
 }
 
@@ -99,47 +106,47 @@ func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
 	s := b[st:]
 	l := make([]interface{}, 0)
 	for j := 1; j < len(s); {
-		if unicode.IsDigit(rune(s[j])) { // string
-			c := strings.Index(s[j:], ":")
-			nEndInd := j + c
+		switch {
+		case unicode.IsDigit(rune(s[j])):
+			str := s[j:]
+			c := strings.Index(str, ":")
+			j += c
 			// fmt.Println("c, nEnd", c, nEndInd)
-			n, err := strconv.Atoi(string(s[j:nEndInd]))
+			n, err := strconv.Atoi(string(str[:c]))
 			// fmt.Println("n", n)
 			if err != nil {
 				return st, err
 			}
-			ind := nEndInd + 1 // skip : and n
-			l = append(l, s[ind:ind+n])
-			// fmt.Println("appending", s[ind:ind+n])
-			j = nEndInd + n + 1
-			// fmt.Println("i, j", i, j)
-		} else if s[j] == 'i' { // integer
+			ind := c + 1 // skip : and n
+			l = append(l, str[ind:ind+n])
+			// fmt.Println("appending", str[ind:ind+n])
+			j += n + 1
+		case s[j] == 'i':
 			j++
 			ie := strings.Index(s[j:], "e")
 			in := s[j : ie+j]
-			n, _ := strconv.Atoi(in)
-			l = append(l, n)
-			// fmt.Println("appending", n)
-			j += ie + 1
-			// fmt.Println("i, j", i, j)
-		} else if s[j] == 'l' {
-			j, err = decodeList(b, j, &l)
+			n, err := strconv.Atoi(in)
 			if err != nil {
 				return st, err
 			}
-			j++
-			i = j
-		} else if s[j] == 'e' {
+			l = append(l, n)
+			// fmt.Println("appending", n)
+			j += ie + 1
+		case s[j] == 'l':
+			new, err := decodeList(b, st+j, &l)
+			if err != nil {
+				return st, err
+			}
+			j = new - st
+		case s[j] == 'e':
 			i = st + j
-			// fmt.Println("exiting loop", i, j)
-			break
-		} else {
+			*v = append(*v, l)
+			return i + 1, err
+		default:
 			j++
 		}
 	}
-	// fmt.Println("returning to decode() with i", i)
-	*v = append(*v, l)
-	return i, err
+	return i, fmt.Errorf("'e' not found, malformed list")
 }
 
 func main() {
@@ -148,21 +155,25 @@ func main() {
 		return
 	}
 	command := os.Args[1]
-	var v []interface{}
+	v := make([]interface{}, 0)
 	if command == "decode" {
-		_, err := decode(os.Args[2], 0, &v)
+		i, err := decode(os.Args[2], 0, &v)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		for _, value := range v {
-			jsonOutput, err := json.Marshal(value)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-			fmt.Println(string(jsonOutput))
+		// After decoding, ensure no trailing data is left
+		if i != len(os.Args[2]) {
+			fmt.Println(fmt.Errorf("extra data found after valid bencoding"))
+			return
 		}
+
+		jsonOutput, err := json.Marshal(v)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println(string(jsonOutput))
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
