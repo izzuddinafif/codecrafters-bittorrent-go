@@ -35,26 +35,87 @@ func decode(b string, st int, v *[]interface{}) (i int, err error) {
 			return st, err
 		}
 		return decodeNext(b, i, v)
+	case b[i] == 'd':
+		i, err := decodeDict(b, i, v)
+		if err != nil {
+			return st, err
+		}
+		return decodeNext(b, i, v)
 	default:
 		return st, fmt.Errorf("unexpected value: %q, i: %d", b[i], i)
 	}
 }
 
-func decodeNext(b string, i int, v *[]interface{}) (int, error) {
-	if i+1 >= len(b) {
-		// fmt.Println(i, len(b))
-		return i, nil
-	} // exit condition
-	remaining := b[i+1:]
-	if !isValidBencodeCharacter(remaining[0]) {
-		return i, fmt.Errorf("extra data after valid bencoded structure: %q", remaining[0])
-	}
+func decodeDict(b string, st int, v *[]interface{}) (i int, err error) {
+	s := b[st:]
+	d := make(map[any]any, 0)
+	for j := 1; j < len(s); {
 
-	return decode(b, i+1, v)
+	}
+	return i, err
 }
-func isValidBencodeCharacter(ch byte) bool {
-	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
+
+func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
+	s := b[st:]
+	l := make([]interface{}, 0)
+	for j := 1; j < len(s); {
+		switch {
+		case unicode.IsDigit(rune(s[j])):
+			var temp []interface{}
+			newIdx, err := decodeStr(b, st+j, &temp)
+			if err != nil {
+				return st, err
+			}
+			l = append(l, temp...)
+			j = newIdx - st
+		case s[j] == 'i':
+			var temp []interface{}
+			newIdx, err := decodeInt(b, st+j, &temp)
+			if err != nil {
+				return st, err
+			}
+			l = append(l, temp...)
+			j = newIdx - st
+		case s[j] == 'l':
+			newIdx, err := decodeList(b, st+j, &l)
+			if err != nil {
+				return st, err
+			}
+			j = newIdx - st
+		case s[j] == 'e':
+			i = st + j
+			*v = append(*v, l)
+			fmt.Println(i)
+			return i + 1, err
+		default:
+			j++
+		}
+	}
+	return i, fmt.Errorf("'e' not found, malformed list")
 }
+
+func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
+	s := b[st:]
+	c := strings.Index(s, ":")
+	// c += st // catch up with previous string (if exists)
+	if c == -1 {
+		return st, fmt.Errorf("malformed string encoding")
+	}
+	n, err := strconv.Atoi(s[:c])
+	if err != nil {
+		return st, err
+	}
+	if len(s) < c+1+n {
+		return st, fmt.Errorf("string length mismatch or out of bounds")
+	}
+	ind := c + 1 // exclude :
+	str := s[ind : ind+n]
+	*v = append(*v, str)
+	// fmt.Println("append string:", str)
+	length := n + st + c
+	return length + 1, nil
+}
+
 func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 	i = st + 1
 	if i == len(b) {
@@ -81,73 +142,21 @@ func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 	return e + 1, nil
 }
 
-func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
-	s := b[st:]
-	c := strings.Index(s, ":")
-	// c += st // catch up with previous string (if exists)
-	if c == -1 {
-		return st, fmt.Errorf("malformed string encoding")
+func decodeNext(b string, i int, v *[]interface{}) (int, error) {
+	if i+1 >= len(b) {
+		fmt.Println(i, len(b), v)
+		return i, nil
+	} // exit condition
+	remaining := b[i+1:]
+	if !isValidBencodeCharacter(remaining[0]) {
+		fmt.Println(i, len(b), v)
+		return i, fmt.Errorf("extra data after valid bencoded structure: %q", remaining[0])
 	}
-	n, err := strconv.Atoi(s[:c])
-	if err != nil {
-		return st, err
-	}
-	if len(s) < c+1+n {
-		return st, fmt.Errorf("string length mismatch or out of bounds")
-	}
-	ind := c + 1 // exclude :
-	str := s[ind : ind+n]
-	*v = append(*v, str)
-	// fmt.Println("append string:", str)
-	length := n + st + c
-	return length + 1, nil
+	return decode(b, i, v)
 }
 
-func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
-	s := b[st:]
-	l := make([]interface{}, 0)
-	for j := 1; j < len(s); {
-		switch {
-		case unicode.IsDigit(rune(s[j])):
-			str := s[j:]
-			c := strings.Index(str, ":")
-			j += c
-			// fmt.Println("c, nEnd", c, nEndInd)
-			n, err := strconv.Atoi(string(str[:c]))
-			// fmt.Println("n", n)
-			if err != nil {
-				return st, err
-			}
-			ind := c + 1 // skip : and n
-			l = append(l, str[ind:ind+n])
-			// fmt.Println("appending", str[ind:ind+n])
-			j += n + 1
-		case s[j] == 'i':
-			j++
-			ie := strings.Index(s[j:], "e")
-			in := s[j : ie+j]
-			n, err := strconv.Atoi(in)
-			if err != nil {
-				return st, err
-			}
-			l = append(l, n)
-			// fmt.Println("appending", n)
-			j += ie + 1
-		case s[j] == 'l':
-			new, err := decodeList(b, st+j, &l)
-			if err != nil {
-				return st, err
-			}
-			j = new - st
-		case s[j] == 'e':
-			i = st + j
-			*v = append(*v, l)
-			return i + 1, err
-		default:
-			j++
-		}
-	}
-	return i, fmt.Errorf("'e' not found, malformed list")
+func isValidBencodeCharacter(ch byte) bool {
+	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
 }
 
 func main() {
