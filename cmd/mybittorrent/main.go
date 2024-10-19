@@ -42,6 +42,7 @@ func decode(b string, st int, v *[]interface{}) (i int, err error) {
 
 func decodeNext(b string, i int, v *[]interface{}) (int, error) {
 	if i+1 >= len(b) {
+		// fmt.Println(i, len(b))
 		return i, nil
 	} // exit condition
 	remaining := b[i+1:]
@@ -77,7 +78,7 @@ func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 	}
 	*v = append(*v, x)
 	//fmt.Println("append int:", x)
-	return e, nil
+	return e + 1, nil
 }
 
 func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
@@ -97,9 +98,9 @@ func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
 	ind := c + 1 // exclude :
 	str := s[ind : ind+n]
 	*v = append(*v, str)
-	//fmt.Println("append string:", str)
-	length := c + n + st
-	return length, nil
+	// fmt.Println("append string:", str)
+	length := n + st + c
+	return length + 1, nil
 }
 
 func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
@@ -167,13 +168,14 @@ func main() {
 			fmt.Println(fmt.Errorf("extra data found after valid bencoding"))
 			return
 		}
-
-		jsonOutput, err := json.Marshal(v)
-		if err != nil {
-			fmt.Println(err)
-			return
+		for _, value := range v {
+			jsonOutput, err := json.Marshal(value)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			fmt.Println(string(jsonOutput))
 		}
-		fmt.Println(string(jsonOutput))
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
