@@ -219,13 +219,6 @@ func main() {
 			return
 		}
 		for _, value := range v {
-			// if _, ok := value.(map[any]any); ok {
-			// 	x, err := formatDict()
-			// 	if err != nil {
-
-			// 	}
-			// 	fmt.Println(x)
-			// }
 			jsonOutput, err := json.Marshal(value)
 			if err != nil {
 				fmt.Println(err)
