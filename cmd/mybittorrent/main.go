@@ -48,11 +48,57 @@ func decode(b string, st int, v *[]interface{}) (i int, err error) {
 
 func decodeDict(b string, st int, v *[]interface{}) (i int, err error) {
 	s := b[st:]
-	d := make(map[any]any, 0)
+	d := make(map[string]any, 0)
+	temp := make([]interface{}, 0)
 	for j := 1; j < len(s); {
-
+		switch {
+		case s[j] == 'e':
+			if len(temp)%2 != 0 {
+				return st, fmt.Errorf("the key-value pair is not complete")
+			}
+			for k := 0; k < len(temp)-1; {
+				if k%2 == 0 {
+					key, ok := temp[k].(string)
+					if !ok {
+						return st, fmt.Errorf("key must be string")
+					}
+					d[key] = temp[k+1]
+					// fmt.Println(temp, d)
+				}
+				k += 2
+			}
+			*v = append(*v, d)
+			i = st + j
+			return i + 1, err
+		case unicode.IsDigit(rune(s[j])):
+			newIdx, err := decodeStr(b, st+j, &temp)
+			if err != nil {
+				return st, err
+			}
+			j = newIdx - st
+		case s[j] == 'i':
+			newIdx, err := decodeInt(b, st+j, &temp)
+			if err != nil {
+				return st, err
+			}
+			j = newIdx - st
+		case s[j] == 'l':
+			newIdx, err := decodeList(b, st+j, &temp)
+			if err != nil {
+				return st, err
+			}
+			j = newIdx - st
+		case s[j] == 'd':
+			t := make([]interface{}, 0)
+			newIdx, err := decodeDict(b, st+j, &t)
+			if err != nil {
+				return st, err
+			}
+			temp = append(temp, t...)
+			j = newIdx - st
+		}
 	}
-	return i, err
+	return i, fmt.Errorf("'e' not found, malformed dict")
 }
 
 func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
@@ -60,21 +106,22 @@ func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
 	l := make([]interface{}, 0)
 	for j := 1; j < len(s); {
 		switch {
+		case s[j] == 'e':
+			i = st + j
+			*v = append(*v, l)
+			// fmt.Println("appending list:", l)
+			return i + 1, err
 		case unicode.IsDigit(rune(s[j])):
-			var temp []interface{}
-			newIdx, err := decodeStr(b, st+j, &temp)
+			newIdx, err := decodeStr(b, st+j, &l)
 			if err != nil {
 				return st, err
 			}
-			l = append(l, temp...)
 			j = newIdx - st
 		case s[j] == 'i':
-			var temp []interface{}
-			newIdx, err := decodeInt(b, st+j, &temp)
+			newIdx, err := decodeInt(b, st+j, &l)
 			if err != nil {
 				return st, err
 			}
-			l = append(l, temp...)
 			j = newIdx - st
 		case s[j] == 'l':
 			newIdx, err := decodeList(b, st+j, &l)
@@ -82,13 +129,7 @@ func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
 				return st, err
 			}
 			j = newIdx - st
-		case s[j] == 'e':
-			i = st + j
-			*v = append(*v, l)
-			fmt.Println(i)
-			return i + 1, err
-		default:
-			j++
+		case s[j] == 'd':
 		}
 	}
 	return i, fmt.Errorf("'e' not found, malformed list")
@@ -138,18 +179,18 @@ func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 		return st, err
 	}
 	*v = append(*v, x)
-	//fmt.Println("append int:", x)
+	// fmt.Println("append int:", x)
 	return e + 1, nil
 }
 
 func decodeNext(b string, i int, v *[]interface{}) (int, error) {
 	if i+1 >= len(b) {
-		fmt.Println(i, len(b), v)
+		// fmt.Println(i, len(b), v)
 		return i, nil
 	} // exit condition
 	remaining := b[i+1:]
 	if !isValidBencodeCharacter(remaining[0]) {
-		fmt.Println(i, len(b), v)
+		// fmt.Println(i, len(b), v)
 		return i, fmt.Errorf("extra data after valid bencoded structure: %q", remaining[0])
 	}
 	return decode(b, i, v)
@@ -178,6 +219,13 @@ func main() {
 			return
 		}
 		for _, value := range v {
+			// if _, ok := value.(map[any]any); ok {
+			// 	x, err := formatDict()
+			// 	if err != nil {
+
+			// 	}
+			// 	fmt.Println(x)
+			// }
 			jsonOutput, err := json.Marshal(value)
 			if err != nil {
 				fmt.Println(err)
