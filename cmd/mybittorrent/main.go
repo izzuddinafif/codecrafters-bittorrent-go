@@ -366,6 +366,14 @@ func trackerGetReq(URL string, data []byte, l int) (map[string]interface{}, erro
 	trackerURL, _ := url.Parse(URL)
 	v := url.Values{}
 	v.Add("info_hash", string(hash))
+	/*
+		URL encoding of binary data based on RFC 3986, see https://datatracker.ietf.org/doc/html/rfc3986#section-2.1
+
+		var encodedInfoHash string
+		for _, b := range infoHash {
+		    encodedInfoHash += fmt.Sprintf("%%%02X", b)
+		}
+	*/
 	v.Add("peer_id", peer_id)
 	v.Add("port", port)
 	v.Add("uploaded", uploaded)
@@ -387,14 +395,15 @@ func trackerGetReq(URL string, data []byte, l int) (map[string]interface{}, erro
 
 func parsePeers(d map[string]interface{}) []string {
 	peers := d["peers"].(string)
-	var addr []string
+	var sockets []string
 	for i := 0; i < len(peers)-5; {
 		ip := net.IP(peers[i : i+4])
+		// Port is 2 bytes = 2^(8*2) = 16 bit unsigned integer (see RFC 793 Section 3.1), big-endian format or network byte order (see RFC 1700)
 		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
-		addr = append(addr, fmt.Sprint(ip, ":", port))
+		sockets = append(sockets, fmt.Sprint(ip, ":", port))
 		i += 6
 	}
-	return addr
+	return sockets
 }
 
 func runCommand(command string) {
