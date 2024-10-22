@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
 	"unicode"
 )
 
-func decode(b string, st int, v *[]interface{}) (i int, err error) {
+func decode(b []byte, st int, v *[]interface{}) (i int, err error) {
 	if st == len(b) {
 		return st, io.ErrUnexpectedEOF
 	}
@@ -46,7 +47,7 @@ func decode(b string, st int, v *[]interface{}) (i int, err error) {
 	}
 }
 
-func decodeDict(b string, st int, v *[]interface{}) (i int, err error) {
+func decodeDict(b []byte, st int, v *[]interface{}) (i int, err error) {
 	s := b[st:]
 	d := make(map[string]any, 0)
 	temp := make([]interface{}, 0)
@@ -58,12 +59,29 @@ func decodeDict(b string, st int, v *[]interface{}) (i int, err error) {
 			}
 			for k := 0; k < len(temp)-1; {
 				if k%2 == 0 {
-					key, ok := temp[k].(string)
-					if !ok {
-						return st, fmt.Errorf("key must be string")
+					key, _ := temp[k].([]byte)
+
+					keyStr := string(key)
+
+					// Handle the value depending on its type
+					switch val := temp[k+1].(type) {
+					case []byte: // For string and binary data
+						if keyStr == "pieces" {
+							d[keyStr] = val
+						} else {
+							d[keyStr] = string(val) // Treat it as a plain string
+						}
+					case int: // For integer values
+						d[keyStr] = val
+					case map[string]interface{}: // Recursively handle nested dictionaries
+						d[keyStr] = val
+					case []interface{}:
+						d[keyStr] = val
+					default:
+						return st, fmt.Errorf("unexpected value type %T for key %s", v, keyStr)
 					}
-					d[key] = temp[k+1]
 					// fmt.Println(temp, d)
+
 				}
 				k += 2
 			}
@@ -89,19 +107,17 @@ func decodeDict(b string, st int, v *[]interface{}) (i int, err error) {
 			}
 			j = newIdx - st
 		case s[j] == 'd':
-			t := make([]interface{}, 0)
-			newIdx, err := decodeDict(b, st+j, &t)
+			newIdx, err := decodeDict(b, st+j, &temp)
 			if err != nil {
 				return st, err
 			}
-			temp = append(temp, t...)
 			j = newIdx - st
 		}
 	}
 	return i, fmt.Errorf("'e' not found, malformed dict")
 }
 
-func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
+func decodeList(b []byte, st int, v *[]interface{}) (i int, err error) {
 	s := b[st:]
 	l := make([]interface{}, 0)
 	for j := 1; j < len(s); {
@@ -130,19 +146,23 @@ func decodeList(b string, st int, v *[]interface{}) (i int, err error) {
 			}
 			j = newIdx - st
 		case s[j] == 'd':
+			newIdx, err := decodeDict(b, st+j, &l)
+			if err != nil {
+				return st, err
+			}
+			j = newIdx - st
 		}
 	}
 	return i, fmt.Errorf("'e' not found, malformed list")
 }
 
-func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
+func decodeStr(b []byte, st int, v *[]interface{}) (i int, err error) {
 	s := b[st:]
-	c := strings.Index(s, ":")
-	// c += st // catch up with previous string (if exists)
+	c := strings.Index(string(s), ":")
 	if c == -1 {
 		return st, fmt.Errorf("malformed string encoding")
 	}
-	n, err := strconv.Atoi(s[:c])
+	n, err := strconv.Atoi(string(s[:c]))
 	if err != nil {
 		return st, err
 	}
@@ -157,17 +177,17 @@ func decodeStr(b string, st int, v *[]interface{}) (i int, err error) {
 	return length + 1, nil
 }
 
-func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
+func decodeInt(b []byte, st int, v *[]interface{}) (i int, err error) {
 	i = st + 1
 	if i == len(b) {
 		return st, fmt.Errorf("bad int")
 	}
-	e := strings.Index(b[st:], "e")
+	e := strings.Index(string(b[st:]), "e")
 	if e == -1 {
 		return st, fmt.Errorf("malformed integer encoding")
 	}
 	e += st
-	n := b[i:e]
+	n := string(b[i:e])
 	if n == "-0" {
 		return st, fmt.Errorf("-0 is not allowed")
 	}
@@ -183,12 +203,12 @@ func decodeInt(b string, st int, v *[]interface{}) (i int, err error) {
 	return e + 1, nil
 }
 
-func decodeNext(b string, i int, v *[]interface{}) (int, error) {
-	if i+1 >= len(b) {
+func decodeNext(b []byte, i int, v *[]interface{}) (int, error) {
+	if i >= len(b) {
 		// fmt.Println(i, len(b), v)
 		return i, nil
 	} // exit condition
-	remaining := b[i+1:]
+	remaining := b[i:]
 	if !isValidBencodeCharacter(remaining[0]) {
 		// fmt.Println(i, len(b), v)
 		return i, fmt.Errorf("extra data after valid bencoded structure: %q", remaining[0])
@@ -200,33 +220,97 @@ func isValidBencodeCharacter(ch byte) bool {
 	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
 }
 
+func check(e error) {
+	if e != nil {
+		log.Fatal(e)
+	}
+}
+
+func readFile(filename string) []byte {
+	file, err := os.Open(filename)
+	check(err)
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	check(err)
+
+	return data
+}
+
+func decodeAndPrint(data []byte) error {
+	v := make([]interface{}, 0)
+	i, err := decode(data, 0, &v)
+	if err != nil {
+		return err
+	}
+	if i != len(data) {
+		return fmt.Errorf("extra data found after valid bencoding")
+	}
+	for _, val := range v {
+		convertByteToString(&val) // Recursively convert []byte to string
+		jsonOutput, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(jsonOutput))
+	}
+	return nil
+}
+
+// Recursive function to convert []byte to string
+func convertByteToString(val *interface{}) {
+	switch v := (*val).(type) {
+	case []byte:
+		*val = string(v) // Convert []byte to string
+	case []interface{}:
+		for i := range v {
+			convertByteToString(&v[i]) // Recursively convert elements inside lists
+		}
+	case map[string]interface{}:
+		for key, elem := range v {
+			convertByteToString(&elem) // Recursively convert elements inside dictionaries
+			v[key] = elem
+		}
+	}
+}
+
+func decodeInfo(data []byte) error {
+	v := make([]interface{}, 0)
+	i, err := decode(data, 0, &v)
+	if err != nil {
+		return err
+	}
+	if i != len(data) {
+		return fmt.Errorf("extra data found after valid bencoding")
+	}
+	d := v[0].(map[string]interface{})
+
+	ann, ok := d["announce"].(string)
+	if !ok {
+		fmt.Println("Tracker URL: no tracker URL ")
+	} else {
+		fmt.Println("Tracker URL: ", ann)
+	}
+	info := d["info"].(map[string]interface{})
+	fmt.Println("Length: ", info["length"])
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: decode <string>")
+		fmt.Println("Usage: (decode/info) <string>")
 		return
 	}
 	command := os.Args[1]
-	v := make([]interface{}, 0)
-	if command == "decode" {
-		i, err := decode(os.Args[2], 0, &v)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		// After decoding, ensure no trailing data is left
-		if i != len(os.Args[2]) {
-			fmt.Println(fmt.Errorf("extra data found after valid bencoding"))
-			return
-		}
-		for _, value := range v {
-			jsonOutput, err := json.Marshal(value)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-			fmt.Println(string(jsonOutput))
-		}
-	} else {
+	switch command {
+	case "decode":
+		err := decodeAndPrint([]byte(os.Args[2]))
+		check(err)
+	case "info":
+		data := readFile(os.Args[2])
+		err := decodeInfo(data)
+		check(err)
+	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
