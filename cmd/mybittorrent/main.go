@@ -1,10 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -59,7 +60,7 @@ func decodeDict(b []byte, st int, v *[]interface{}) (i int, err error) {
 			}
 			for k := 0; k < len(temp)-1; {
 				if k%2 == 0 {
-					key, _ := temp[k].([]byte)
+					key := temp[k].([]byte)
 
 					keyStr := string(key)
 
@@ -220,10 +221,11 @@ func isValidBencodeCharacter(ch byte) bool {
 	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
 }
 
-func check(e error) {
+func check(e error) error {
 	if e != nil {
-		log.Fatal(e)
+		return e
 	}
+	return nil
 }
 
 func readFile(filename string) []byte {
@@ -291,10 +293,57 @@ func decodeInfo(data []byte) error {
 	} else {
 		fmt.Print("Tracker URL: ", ann)
 	}
-	fmt.Println(" ")
-	info := d["info"].(map[string]interface{})
+	fmt.Println("")
+
+	info, ok := d["info"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("'info' is not a dictionary")
+	}
 	fmt.Print("Length: ", info["length"])
+	fmt.Println("")
+
+	hash, err := hashInfo(data)
+	check(err)
+	fmt.Printf("Info Hash: %x", hash)
+
 	return nil
+}
+
+func inspect(data []byte) error {
+	v := make([]interface{}, 0)
+	i, err := decode(data, 0, &v)
+	if err != nil {
+		return err
+	}
+	if i != len(data) {
+		return fmt.Errorf("extra data found after valid bencoding")
+	}
+	for _, val := range v {
+		convertByteToString(&val) // Recursively convert []byte to string
+		jsonOutput, err := json.MarshalIndent(val, "", "	")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(jsonOutput))
+	}
+	return nil
+}
+
+func hashInfo(data []byte) (hash []byte, err error) {
+	infoIdx := bytes.Index(data, []byte("4:info"))
+	if infoIdx == -1 {
+		return nil, fmt.Errorf("info key not found in the bencoded data")
+	}
+	infoIdx += 6
+	info := data[infoIdx:]
+	e := bytes.LastIndex(info, []byte("e"))
+	info = info[:e]
+	// fmt.Println("after:", info)
+	hasher := sha1.New()
+	hasher.Write(info)
+
+	hash = hasher.Sum(nil)
+	return hash, nil
 }
 
 func main() {
@@ -303,16 +352,29 @@ func main() {
 		return
 	}
 	command := os.Args[1]
+	data := readFile(os.Args[2])
+	var err error
 	switch command {
 	case "decode":
-		err := decodeAndPrint([]byte(os.Args[2]))
-		check(err)
+		err = decodeAndPrint(data)
 	case "info":
-		data := readFile(os.Args[2])
-		err := decodeInfo(data)
+		err = decodeInfo(data)
+	case "inspect":
+		err = inspect(data)
+	case "hashinfo":
+		fmt.Println("before", data)
+		hash, err := hashInfo(data)
 		check(err)
+		fmt.Printf("hash: %x", hash)
+	case "raw":
+		fmt.Println(data)
 	default:
 		fmt.Println("Unknown command: " + command)
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
