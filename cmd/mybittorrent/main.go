@@ -292,7 +292,7 @@ func decodeInfo(data []byte) error {
 		fmt.Println("Tracker URL: ", ann)
 	}
 	info := d["info"].(map[string]interface{})
-	fmt.Println("Length: ", info["length"])
+	fmt.Print("Length: ", info["length"])
 	return nil
 }
 
