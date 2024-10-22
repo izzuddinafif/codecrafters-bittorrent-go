@@ -356,11 +356,14 @@ func main() {
 	var err error
 	switch command {
 	case "decode":
-		err = decodeAndPrint(data)
+		err = decodeAndPrint([]byte(os.Args[2]))
+		check(err)
 	case "info":
 		err = decodeInfo(data)
+		check(err)
 	case "inspect":
 		err = inspect(data)
+		check(err)
 	case "hashinfo":
 		fmt.Println("before", data)
 		hash, err := hashInfo(data)
