@@ -287,10 +287,11 @@ func decodeInfo(data []byte) error {
 
 	ann, ok := d["announce"].(string)
 	if !ok {
-		fmt.Println("Tracker URL: no tracker URL ")
+		fmt.Print("Tracker URL: no tracker URL ")
 	} else {
-		fmt.Println("Tracker URL: ", ann)
+		fmt.Print("Tracker URL: ", ann)
 	}
+	fmt.Println(" ")
 	info := d["info"].(map[string]interface{})
 	fmt.Print("Length: ", info["length"])
 	return nil
