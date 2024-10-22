@@ -2,14 +2,20 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha1"
-	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"crypto/sha1"
+	"encoding/binary"
+	"encoding/json"
 )
 
 func decode(b []byte, st int, v *[]interface{}) (i int, err error) {
@@ -259,7 +265,6 @@ func decodeAndPrint(data []byte) error {
 	return nil
 }
 
-// Recursive function to convert []byte to string
 func convertByteToString(val *interface{}) {
 	switch v := (*val).(type) {
 	case []byte:
@@ -276,17 +281,35 @@ func convertByteToString(val *interface{}) {
 	}
 }
 
-func decodeInfo(data []byte) error {
-	v := make([]interface{}, 0)
-	i, err := decode(data, 0, &v)
+func inspect(data []byte) error {
+	v := extractData(data)
+	for _, val := range v {
+		convertByteToString(&val) // Recursively convert []byte to string
+	}
+	jsonOutput, err := json.MarshalIndent(v, "", "	")
 	if err != nil {
 		return err
 	}
-	if i != len(data) {
-		return fmt.Errorf("extra data found after valid bencoding")
-	}
-	d := v[0].(map[string]interface{})
+	fmt.Println(string(jsonOutput))
+	return nil
+}
 
+func extractData(data []byte) map[string]interface{} {
+	v := make([]interface{}, 0)
+	i, err := decode(data, 0, &v)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if i != len(data) {
+		log.Fatal("extra data found after valid bencoding")
+	}
+
+	return v[0].(map[string]interface{})
+}
+
+func decodeInfo(data []byte) error {
+	d := extractData(data)
+	fmt.Println("here")
 	ann, ok := d["announce"].(string)
 	if !ok {
 		fmt.Print("Tracker URL: no tracker URL ")
@@ -314,26 +337,6 @@ func decodeInfo(data []byte) error {
 	return nil
 }
 
-func inspect(data []byte) error {
-	v := make([]interface{}, 0)
-	i, err := decode(data, 0, &v)
-	if err != nil {
-		return err
-	}
-	if i != len(data) {
-		return fmt.Errorf("extra data found after valid bencoding")
-	}
-	for _, val := range v {
-		convertByteToString(&val) // Recursively convert []byte to string
-		jsonOutput, err := json.MarshalIndent(val, "", "	")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(jsonOutput))
-	}
-	return nil
-}
-
 func hashInfo(data []byte) (hash []byte, err error) {
 	infoIdx := bytes.Index(data, []byte("4:info"))
 	if infoIdx == -1 {
@@ -343,7 +346,6 @@ func hashInfo(data []byte) (hash []byte, err error) {
 	info := data[infoIdx:]
 	e := bytes.LastIndex(info, []byte("e"))
 	info = info[:e]
-	// fmt.Println("after:", info)
 	hasher := sha1.New()
 	hasher.Write(info)
 
@@ -351,14 +353,54 @@ func hashInfo(data []byte) (hash []byte, err error) {
 	return hash, nil
 }
 
-func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: (decode/info) <string>")
-		return
+func trackerGetReq(URL string, data []byte, l int) (map[string]interface{}, error) {
+	left := strconv.Itoa(l)
+	hash, err := hashInfo(data)
+	if err != nil {
+		return nil, err
 	}
-	command := os.Args[1]
-	data := readFile(os.Args[2])
+	var (
+		peer_id, port, uploaded, downloaded, compact string = "IzzuddinAhmadAfif:-)", "6881", "0", "0", "1"
+	)
+
+	trackerURL, _ := url.Parse(URL)
+	v := url.Values{}
+	v.Add("info_hash", string(hash))
+	v.Add("peer_id", peer_id)
+	v.Add("port", port)
+	v.Add("uploaded", uploaded)
+	v.Add("downloaded", downloaded)
+	v.Add("left", left)
+	v.Add("compact", compact)
+
+	trackerURL.RawQuery = v.Encode()
+	resp, err := http.Get(trackerURL.String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+
+	return extractData(b), err
+}
+
+func parsePeers(d map[string]interface{}) []string {
+	peers := d["peers"].(string)
+	var addr []string
+	for i := 0; i < len(peers)-5; {
+		ip := net.IP(peers[i : i+4])
+		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+		addr = append(addr, fmt.Sprint(ip, ":", port))
+		i += 6
+	}
+	return addr
+}
+
+func runCommand(command string) {
 	var err error
+	data := readFile(os.Args[2])
+
 	switch command {
 	case "decode":
 		err = decodeAndPrint([]byte(os.Args[2]))
@@ -369,20 +411,30 @@ func main() {
 	case "inspect":
 		err = inspect(data)
 		check(err)
-	case "hashinfo":
-		fmt.Println("before", data)
-		hash, err := hashInfo(data)
+	case "peers":
+		d := extractData(data)
+		info, ok := d["info"].(map[string]interface{})
+		if !ok {
+			log.Fatal("'info' is not a dictionary")
+		}
+		d, err = trackerGetReq(d["announce"].(string), data, info["length"].(int))
 		check(err)
-		fmt.Printf("hash: %x", hash)
-	case "raw":
-		fmt.Println(data)
+		peers := parsePeers(d)
+		check(err)
+		for _, p := range peers {
+			fmt.Println(p)
+		}
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
 	}
+}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+func main() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: (decode/info/peers) <string>")
+		return
 	}
+	command := os.Args[1]
+	runCommand(command)
 }
