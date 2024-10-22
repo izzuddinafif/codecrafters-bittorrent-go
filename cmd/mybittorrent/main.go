@@ -305,7 +305,12 @@ func decodeInfo(data []byte) error {
 	hash, err := hashInfo(data)
 	check(err)
 	fmt.Printf("Info Hash: %x", hash)
+	fmt.Println("")
 
+	fmt.Print("Piece Length: ", info["piece length"])
+	fmt.Println("")
+	fmt.Printf("Piece Hashes: %x", info["pieces"])
+	fmt.Println("")
 	return nil
 }
 
