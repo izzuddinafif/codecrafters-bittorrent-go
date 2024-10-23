@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"crypto/rand"
@@ -230,7 +231,7 @@ func isValidBencodeCharacter(ch byte) bool {
 
 func check(e error) error {
 	if e != nil {
-		return e
+		log.Fatal(e)
 	}
 	return nil
 }
@@ -310,7 +311,6 @@ func extractData(data []byte) map[string]interface{} {
 
 func decodeInfo(data []byte) error {
 	d := extractData(data)
-	fmt.Println("here")
 	ann, ok := d["announce"].(string)
 	if !ok {
 		fmt.Print("Tracker URL: no tracker URL ")
@@ -414,28 +414,41 @@ func parsePeers(d map[string]interface{}) []string {
 	165.232.35.114:51437
 */
 
-func bpHandshake(hash []byte, socket string) error {
+func getPeers(data []byte) []string {
+	d := extractData(data)
+	info, ok := d["info"].(map[string]interface{})
+	if !ok {
+		log.Fatal("'info' is not a dictionary")
+	}
+	d, err := trackerGetReq(d["announce"].(string), data, info["length"].(int))
+	check(err)
+
+	return parsePeers(d)
+}
+
+func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
 	conn, err := net.Dial("tcp", socket)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	defer conn.Close()
 
 	b := bpHandshakeMsg(hash)
 
 	_, err = conn.Write(b)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	buf := make([]byte, 68)
-	_, err = conn.Read(buf)
+	buf := make([]byte, 68) // BitTorrent Handshake length
+	n, err := io.ReadFull(conn, buf)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	if n != 68 {
+		return nil, nil, fmt.Errorf("unexpected handshake size")
 	}
 	peer_id := buf[48:]
-	fmt.Printf("Peer ID: %x\n", peer_id)
-	return nil
+	return conn, peer_id, nil
 }
 
 func bpHandshakeMsg(hash []byte) (b []byte) {
@@ -452,41 +465,223 @@ func bpHandshakeMsg(hash []byte) (b []byte) {
 	return b
 }
 
+func rcvPeerMsg(conn net.Conn) ([]byte, error) {
+	var err error
+	size := make([]byte, 4)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Increase timeout to 10 seconds
+	n, err := conn.Read(size)                             // read the payload + msg id length
+	fmt.Println("bytes read:", n, "content:", size)
+	if err != nil {
+		fmt.Println("error reading payload + msg id length:", err)
+		return nil, err
+	}
+
+	length := binary.BigEndian.Uint32(size)
+	if length == 0 {
+		fmt.Println("received keep-alive message")
+		return nil, fmt.Errorf("received keep-alive message (no data)")
+	}
+
+	buf := make([]byte, length) // read msg id + payload
+	n, err = io.ReadFull(conn, buf)
+	if err != nil {
+		fmt.Printf("error reading message: received %d bytes, expected %d: %v\n", n, length, err)
+		return nil, err
+	}
+
+	msgID := buf[0] // The first byte is the message ID
+	fmt.Printf("Received message: msgID=%d, length=%d\n", msgID, length)
+
+	return buf, nil
+}
+
+func sendPeerMsg(conn net.Conn, msgID byte, pieceIdx, blockOffset, blockLength uint32) error {
+	size := make([]byte, 4)
+	binary.BigEndian.PutUint32(size, 1)
+	msgId := make([]byte, 1)
+	msgId[0] = msgID
+
+	var msg []byte
+
+	if msgID == 6 {
+		binary.BigEndian.PutUint32(size, 13)
+		index := make([]byte, 4)
+		binary.BigEndian.PutUint32(index, pieceIdx)
+		begin := make([]byte, 4)
+		binary.BigEndian.PutUint32(begin, blockOffset)
+		length := make([]byte, 4)
+		binary.BigEndian.PutUint32(length, blockLength)
+
+		payload := append(index, begin...)
+		payload = append(payload, length...)
+
+		msg = append(size, msgId...)
+		msg = append(msg, payload...)
+
+		fmt.Printf("Sending request: msgID=%d, pieceIdx=%d, blockOffset=%d, blockLength=%d\n", msgID, pieceIdx, blockOffset, blockLength)
+		fmt.Printf("Full message: %x\n", msg)
+	} else {
+		msg = append(size, msgId...)
+	}
+
+	n, err := conn.Write(msg)
+	if err != nil {
+		return err
+	}
+	fmt.Println("sent bytes: ", n)
+	return nil
+}
+
+func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]byte, error) {
+	pieceIdx := uint32(pieceIndex)
+	// receive bitfield message
+	buf, err := rcvPeerMsg(conn)
+	if err != nil {
+		return nil, err
+	}
+	if buf[0] != 5 { // Check if the message ID is 5 (bitfield)
+		return nil, fmt.Errorf("expected bitfield message 5, got %d", buf[0])
+	}
+
+	// ignoring bitfield msg payload for now
+
+	// sending interested message
+	err = sendPeerMsg(conn, 2, pieceIdx, 0, 0) // 2 for interested
+	if err != nil {
+		return nil, err
+	}
+
+	// receive unchoke message
+	buf, err = rcvPeerMsg(conn)
+	if err != nil {
+		return nil, err
+	}
+	if buf[0] != 1 { // Check if the message ID is 1
+		return nil, fmt.Errorf("expected unchoke message 1, got %d", buf[0])
+	}
+
+	// send request mesasage for each blocks. dividing the piece into blocks of 16 kiB
+	info := d["info"].(map[string]interface{})
+
+	pieceLen := info["piece length"].(int)
+	x := 1
+	x = x << 14 // 16 kiB / 2^14
+	totalBLocks := pieceLen / x
+	if pieceLen%x != 0 {
+		totalBLocks++
+	}
+	blockLength := uint32(x)
+	var piece []byte
+	var blockOffset uint32
+	for i := 0; i < totalBLocks; i++ {
+		fmt.Println("iteration ", i, "blockOffset:", blockOffset)
+		if i == totalBLocks-1 && pieceLen%x != 0 {
+			blockLength = uint32(pieceLen % x)
+		}
+		err = sendPeerMsg(conn, 6, pieceIdx, blockOffset, blockLength) // 6 for request
+		if err != nil {
+			return nil, err
+		}
+
+		buf, err := rcvPeerMsg(conn)
+		if err != nil {
+			fmt.Println("Error receiving message:", err)
+			return nil, err
+		}
+
+		// Ensure that buf has enough data before accessing its contents
+		if len(buf) < 1+4+4+4 {
+			return nil, fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4+4, len(buf))
+		}
+		if buf[0] != 7 { // Check if the message ID is 7
+			return nil, fmt.Errorf("expected piece message 7, got %d", buf[0])
+		}
+		if blockLength != uint32(len(buf[1+4+4:])) {
+			return nil, fmt.Errorf("block size received %d does not match the expected size %d", len(buf[1+4+4:]), blockLength)
+		}
+		piece = append(piece, buf[1+4+4:]...)
+		blockOffset += uint32(x)
+	}
+
+	fmt.Println("piece length:", len(piece))
+	// check piece integrity
+	hash := info["pieces"].([]byte)
+	hashStart := pieceIndex * 20
+	hashEnd := hashStart + 20
+
+	if hashEnd > len(hash) {
+		return nil, fmt.Errorf("piece index is out of range for the hash data")
+	}
+	h := sha1.New()
+	h.Write(piece)
+	newHash := h.Sum(nil)
+
+	if !bytes.Equal(newHash, hash[hashStart:hashEnd]) {
+		return nil, fmt.Errorf("piece integrity is compromised")
+	} else {
+		fmt.Println("Hash matches")
+	}
+	return piece, nil
+}
+
+func createFile(filename string, path string) error {
+	return nil
+}
+
 func runCommand(command string) {
 	var err error
-	data := readFile(os.Args[2])
 
 	switch command {
 	case "decode":
 		err = decodeAndPrint([]byte(os.Args[2]))
 		check(err)
 	case "info":
+		data := readFile(os.Args[2])
 		err = decodeInfo(data)
 		check(err)
 	case "inspect":
+		data := readFile(os.Args[2])
 		err = inspect(data)
 		check(err)
 	case "peers":
-		d := extractData(data)
-		info, ok := d["info"].(map[string]interface{})
-		if !ok {
-			log.Fatal("'info' is not a dictionary")
-		}
-		d, err = trackerGetReq(d["announce"].(string), data, info["length"].(int))
-		check(err)
-		peers := parsePeers(d)
+		data := readFile(os.Args[2])
+		peers := getPeers(data)
 		check(err)
 		for _, p := range peers {
 			fmt.Println(p)
 		}
 	case "handshake":
+		data := readFile(os.Args[2])
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: handshake <filename> <ip:port>")
 			return
 		}
 		hash, err := hashInfo(data)
 		check(err)
-		bpHandshake(hash, os.Args[3])
+		conn, peer_id, err := bpHandshake(hash, os.Args[3])
+		defer conn.Close()
+		check(err)
+		fmt.Printf("Peer ID: %x\n", peer_id)
+	case "download_piece":
+		if len(os.Args) < 6 {
+			fmt.Println("Usage: download_piece -o </path/to/downloaded/file> <filename> <piece_index>")
+			return
+		}
+		data := readFile(os.Args[4])
+		hash, err := hashInfo(data)
+		d := extractData(data)
+		check(err)
+		peers := getPeers(data)
+		conn, _, err := bpHandshake(hash, peers[0])
+		defer conn.Close()
+		check(err)
+		pieceIdx, err := strconv.Atoi(os.Args[5])
+		check(err)
+		_, err = downloadPiece(conn, d, pieceIdx)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -495,7 +690,7 @@ func runCommand(command string) {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: (decode/info/peers/handshake) <string>")
+		fmt.Println("Usage: (decode/info/peers/handshake/download_piece) <string> ...")
 		return
 	}
 	command := os.Args[1]
