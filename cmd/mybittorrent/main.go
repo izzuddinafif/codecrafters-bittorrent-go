@@ -561,7 +561,7 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	x := 1
 	x = x << 14 // 16 kiB / 2^14
 
-	if pieceIndex == length/pieceLen {
+	if pieceIndex == length/pieceLen { // TODO: figure out how and why this worked :)
 		pieceLen = length % pieceLen
 	}
 	totalBLocks := pieceLen / x
