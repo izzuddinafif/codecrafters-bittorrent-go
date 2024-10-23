@@ -555,27 +555,28 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 
 	// send request mesasage for each blocks. dividing the piece into blocks of 16 kiB
 	info := d["info"].(map[string]interface{})
-
 	length := info["length"].(int)
 	pieceLen := info["piece length"].(int)
+
 	x := 1
 	x = x << 14 // 16 kiB / 2^14
+
+	if pieceIndex == pieceLen/x {
+		pieceLen = length % pieceLen
+	}
 	totalBLocks := pieceLen / x
 	if pieceLen%x != 0 {
-		fmt.Println("here1")
 		totalBLocks++
 	}
+
 	fmt.Println("total blocks:", totalBLocks, "file len:", length, "piece len:", pieceLen, "piecelen%x", pieceLen%x)
 	blockLength := uint32(x)
 	var piece []byte
 	var blockOffset uint32
 	for i := 0; i < totalBLocks; i++ {
 		fmt.Println("iteration ", i, "blockOffset:", blockOffset)
-		if i == totalBLocks-1 {
-			if pieceLen%x != 0 {
-				fmt.Println("should be here")
-				blockLength = uint32(pieceLen % x)
-			}
+		if i == totalBLocks-1 && pieceLen%x != 0 {
+			blockLength = uint32(pieceLen % x)
 		}
 		err = sendPeerMsg(conn, 6, pieceIdx, blockOffset, blockLength) // 6 for request
 		if err != nil {
