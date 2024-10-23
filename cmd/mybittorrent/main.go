@@ -556,6 +556,7 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	// send request mesasage for each blocks. dividing the piece into blocks of 16 kiB
 	info := d["info"].(map[string]interface{})
 
+	length := info["length"].(int)
 	pieceLen := info["piece length"].(int)
 	x := 1
 	x = x << 14 // 16 kiB / 2^14
@@ -564,7 +565,7 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 		fmt.Println("here1")
 		totalBLocks++
 	}
-	fmt.Println("total blocks:", totalBLocks, "piece len:", pieceLen, "piecelen%x", pieceLen%x)
+	fmt.Println("total blocks:", totalBLocks, "file len:", length, "piece len:", pieceLen, "piecelen%x", pieceLen%x)
 	blockLength := uint32(x)
 	var piece []byte
 	var blockOffset uint32
