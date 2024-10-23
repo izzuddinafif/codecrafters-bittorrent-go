@@ -561,8 +561,10 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	x = x << 14 // 16 kiB / 2^14
 	totalBLocks := pieceLen / x
 	if pieceLen%x != 0 {
+		fmt.Println("here1")
 		totalBLocks++
 	}
+	fmt.Println("total blocks:", totalBLocks, "piece len:", pieceLen, "piecelen%x", pieceLen%x)
 	blockLength := uint32(x)
 	var piece []byte
 	var blockOffset uint32
@@ -616,10 +618,6 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 		fmt.Println("Hash matches")
 	}
 	return piece, nil
-}
-
-func createFile(filename string, path string) error {
-	return nil
 }
 
 func runCommand(command string) {
