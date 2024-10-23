@@ -557,7 +557,7 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	info := d["info"].(map[string]interface{})
 	length := info["length"].(int)
 	pieceLen := info["piece length"].(int)
-
+	fmt.Println("piece length from torrent file:", pieceLen)
 	x := 1
 	x = x << 14 // 16 kiB / 2^14
 
@@ -569,7 +569,7 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 		totalBLocks++
 	}
 
-	fmt.Println("total blocks:", totalBLocks, "file len:", length, "piece len:", pieceLen, "piecelen%x", pieceLen%x)
+	fmt.Println("total blocks:", totalBLocks, "file len:", length, "piece len actual:", pieceLen, "piecelen%x", pieceLen%x)
 	blockLength := uint32(x)
 	var piece []byte
 	var blockOffset uint32
