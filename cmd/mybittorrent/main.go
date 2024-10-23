@@ -574,10 +574,10 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	var piece []byte
 	var blockOffset uint32
 	for i := 0; i < totalBLocks; i++ {
-		fmt.Println("iteration ", i, "blockOffset:", blockOffset)
-		if i == totalBLocks-1 {
+		if i == totalBLocks-1 && pieceLen%x != 0 {
 			blockLength = uint32(pieceLen % x)
 		}
+		fmt.Println("iteration ", i, "blockOffset:", blockOffset)
 		err = sendPeerMsg(conn, 6, pieceIdx, blockOffset, blockLength) // 6 for request
 		if err != nil {
 			return nil, err
