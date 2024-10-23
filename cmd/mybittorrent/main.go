@@ -229,11 +229,10 @@ func isValidBencodeCharacter(ch byte) bool {
 	return unicode.IsDigit(rune(ch)) || ch == 'i' || ch == 'l' || ch == 'd' || ch == 'e'
 }
 
-func check(e error) error {
+func check(e error) {
 	if e != nil {
-		log.Fatal(e)
+		panic(e)
 	}
-	return nil
 }
 
 func readFile(filename string) []byte {
@@ -431,7 +430,6 @@ func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
 	b := bpHandshakeMsg(hash)
 
 	_, err = conn.Write(b)
@@ -477,11 +475,6 @@ func rcvPeerMsg(conn net.Conn) ([]byte, error) {
 	}
 
 	length := binary.BigEndian.Uint32(size)
-	if length == 0 {
-		fmt.Println("received keep-alive message")
-		return nil, fmt.Errorf("received keep-alive message (no data)")
-	}
-
 	buf := make([]byte, length) // read msg id + payload
 	n, err = io.ReadFull(conn, buf)
 	if err != nil {
@@ -590,8 +583,8 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 		}
 
 		// Ensure that buf has enough data before accessing its contents
-		if len(buf) < 1+4+4+4 {
-			return nil, fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4+4, len(buf))
+		if len(buf) < 1+4+4 {
+			return nil, fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4, len(buf))
 		}
 		if buf[0] != 7 { // Check if the message ID is 7
 			return nil, fmt.Errorf("expected piece message 7, got %d", buf[0])
@@ -677,11 +670,15 @@ func runCommand(command string) {
 		check(err)
 		pieceIdx, err := strconv.Atoi(os.Args[5])
 		check(err)
-		_, err = downloadPiece(conn, d, pieceIdx)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		piece, err := downloadPiece(conn, d, pieceIdx)
+		check(err)
+		f, err := os.Create(os.Args[3])
+		check(err)
+		defer f.Close()
+		_, err = f.Write(piece)
+		check(err)
+		f.Sync()
+
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
