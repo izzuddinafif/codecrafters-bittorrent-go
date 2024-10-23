@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
@@ -406,6 +407,51 @@ func parsePeers(d map[string]interface{}) []string {
 	return sockets
 }
 
+/*
+	IPs and Ports to test bittorrent protocol handshake locally:
+	165.232.41.73:51556
+	165.232.38.164:51532
+	165.232.35.114:51437
+*/
+
+func bpHandshake(hash []byte, socket string) error {
+	conn, err := net.Dial("tcp", socket)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	b := bpHandshakeMsg(hash)
+
+	_, err = conn.Write(b)
+	if err != nil {
+		return err
+	}
+
+	buf := make([]byte, 68)
+	_, err = conn.Read(buf)
+	if err != nil {
+		return err
+	}
+	peer_id := buf[48:]
+	fmt.Printf("Peer ID: %x\n", peer_id)
+	return nil
+}
+
+func bpHandshakeMsg(hash []byte) (b []byte) {
+	b = append(b, byte(19))
+	b = append(b, []byte("BitTorrent protocol")...)
+	b = append(b, make([]byte, 8)...)
+	b = append(b, hash...)
+	buf := make([]byte, 20)
+	_, err := rand.Read(buf)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b = append(b, buf...)
+	return b
+}
+
 func runCommand(command string) {
 	var err error
 	data := readFile(os.Args[2])
@@ -433,6 +479,14 @@ func runCommand(command string) {
 		for _, p := range peers {
 			fmt.Println(p)
 		}
+	case "handshake":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: handshake <filename> <ip:port>")
+			return
+		}
+		hash, err := hashInfo(data)
+		check(err)
+		bpHandshake(hash, os.Args[3])
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -441,7 +495,7 @@ func runCommand(command string) {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: (decode/info/peers) <string>")
+		fmt.Println("Usage: (decode/info/peers/handshake) <string>")
 		return
 	}
 	command := os.Args[1]
