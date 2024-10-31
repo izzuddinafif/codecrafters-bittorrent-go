@@ -949,7 +949,7 @@ func runCommand(command string) {
 		conn, peer_id, err := bpHandshake(peers[0], bpHandshakeMsgExt(hash))
 		defer conn.Close()
 		check(err)
-		fmt.Printf("Peer ID: %x \n", peer_id)
+		fmt.Printf("Peer ID: %x\n", peer_id)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
