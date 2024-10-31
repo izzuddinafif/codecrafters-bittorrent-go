@@ -943,8 +943,7 @@ func runCommand(command string) {
 		hash, err := hex.DecodeString(data["info hash"])
 		check(err)
 
-		largeLeft := 1 << 30 // 1GB
-		p, err := trackerGetReq(data["announce"], hash, largeLeft)
+		p, err := trackerGetReq(data["announce"], hash, 555)
 		check(err)
 		peers := parsePeers(p)
 		conn, peer_id, err := bpHandshake(peers[0], bpHandshakeMsgExt(hash))
