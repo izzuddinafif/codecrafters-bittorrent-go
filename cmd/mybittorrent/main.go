@@ -395,7 +395,7 @@ func trackerGetReq(URL string, hash []byte, l int) (map[string]interface{}, erro
 	query := fmt.Sprintf("info_hash=%s&%s", encodedInfoHash, v.Encode())
 	trackerURL.RawQuery = query
 
-	fmt.Println("Tracker Request URL:", trackerURL.String()) // Debugging line
+	// fmt.Println("Tracker Request URL:", trackerURL.String()) // Debugging line
 
 	// Make the HTTP GET request
 	resp, err := http.Get(trackerURL.String())
