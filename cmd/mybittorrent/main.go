@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 )
 
@@ -355,49 +356,72 @@ func hashInfo(data []byte) (hash []byte, err error) {
 	hash = hasher.Sum(nil)
 	return hash, nil
 }
-
-func trackerGetReq(URL string, data []byte, l int) (map[string]interface{}, error) {
-	left := strconv.Itoa(l)
-	hash, err := hashInfo(data)
-	if err != nil {
-		return nil, err
+func urlEncodeInfoHash(hash []byte) string {
+	encoded := ""
+	for _, b := range hash {
+		// Each byte is represented as %XX where XX is the uppercase hex value
+		encoded += fmt.Sprintf("%%%02X", b)
 	}
-	var (
-		peer_id, port, uploaded, downloaded, compact string = "IzzuddinAhmadAfif:-)", "6881", "0", "0", "1"
-	)
+	return encoded
+}
+func trackerGetReq(URL string, hash []byte, l int) (map[string]interface{}, error) {
+	left := strconv.Itoa(l)
+	peer_id := "IzzuddinAhmadAfif:-)"
+	port := "6881"
+	uploaded := "0"
+	downloaded := "0"
+	compact := "1"
 
-	trackerURL, _ := url.Parse(URL)
+	// Percent-encode the info_hash manually
+	encodedInfoHash := urlEncodeInfoHash(hash)
+
+	// Use url.Values for the rest of the parameters
 	v := url.Values{}
-	v.Add("info_hash", string(hash))
-	/*
-		URL encoding of binary data based on RFC 3986, see https://datatracker.ietf.org/doc/html/rfc3986#section-2.1
+	v.Set("peer_id", peer_id)
+	v.Set("port", port)
+	v.Set("uploaded", uploaded)
+	v.Set("downloaded", downloaded)
+	v.Set("left", left)
+	v.Set("compact", compact)
 
-		var encodedInfoHash string
-		for _, b := range infoHash {
-		    encodedInfoHash += fmt.Sprintf("%%%02X", b)
-		}
-	*/
-	v.Add("peer_id", peer_id)
-	v.Add("port", port)
-	v.Add("uploaded", uploaded)
-	v.Add("downloaded", downloaded)
-	v.Add("left", left)
-	v.Add("compact", compact)
+	// Parse the base tracker URL
+	trackerURL, err := url.Parse(URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tracker URL: %v", err)
+	}
 
-	trackerURL.RawQuery = v.Encode()
+	// Manually build the query string with the correctly encoded info_hash
+	// and the rest of the parameters encoded by v.Encode()
+	query := fmt.Sprintf("info_hash=%s&%s", encodedInfoHash, v.Encode())
+	trackerURL.RawQuery = query
+
+	fmt.Println("Tracker Request URL:", trackerURL.String()) // Debugging line
+
+	// Make the HTTP GET request
 	resp, err := http.Get(trackerURL.String())
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	// Read the response body
 	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 
-	return extractData(b), err
+	// Decode the bencoded response
+	data := extractData(b)
+
+	return data, nil
 }
 
 func parsePeers(d map[string]interface{}) []string {
-	peers := d["peers"].(string)
+	// fmt.Println("Tracker Response:", d)
+	peers, ok := d["peers"].(string)
+	if !ok {
+		log.Fatal("No 'peers' field found or 'peers' is not in string format.")
+	}
 	var sockets []string
 	for i := 0; i < len(peers)-5; {
 		ip := net.IP(peers[i : i+4])
@@ -422,21 +446,23 @@ func getPeers(data []byte) []string {
 	if !ok {
 		log.Fatal("'info' is not a dictionary")
 	}
-	d, err := trackerGetReq(d["announce"].(string), data, info["length"].(int))
+
+	hash, err := hashInfo(data)
+	check(err)
+	d, err = trackerGetReq(d["announce"].(string), hash, info["length"].(int))
 	check(err)
 
 	return parsePeers(d)
 }
 
-func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
+func bpHandshake(socket string, handshakeMsg []byte) (net.Conn, []byte, error) {
 
 	conn, err := net.Dial("tcp", socket)
 	if err != nil {
 		return nil, nil, err
 	}
-	b := bpHandshakeMsg(hash)
 
-	_, err = conn.Write(b)
+	_, err = conn.Write(handshakeMsg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -449,7 +475,7 @@ func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
 	if n != 68 {
 		return nil, nil, fmt.Errorf("unexpected handshake size")
 	}
-	fmt.Println("successfull handshake with peer")
+	// fmt.Println("successfull handshake with peer")
 	peer_id := buf[48:]
 
 	return conn, peer_id, nil
@@ -779,7 +805,8 @@ func downloadFile(data []byte) (pieces []byte, err error) {
 	peers := getPeers(data)
 	d := extractData(data)
 	infoHash, err := hashInfo(data)
-	conn, _, err := bpHandshake(infoHash, peers[0]) // use 1 peer for now
+	handshakeMsg := bpHandshakeMsg(infoHash)
+	conn, _, err := bpHandshake(peers[0], handshakeMsg) // use 1 peer for now
 	if err != nil {
 		return nil, err
 	}
@@ -824,6 +851,23 @@ func parseMagnetLink(s string) map[string]string {
 	// fmt.Println(data["announce"])
 	return data
 }
+
+func bpHandshakeMsgExt(hash []byte) (b []byte) {
+	b = append(b, byte(19))
+	b = append(b, []byte("BitTorrent protocol")...)
+	b = append(b, make([]byte, 5)...)
+	b = append(b, byte(16)) // signal support for extensions
+	b = append(b, make([]byte, 2)...)
+	b = append(b, hash...)
+	buf := make([]byte, 20)
+	_, err := rand.Read(buf)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b = append(b, buf...)
+	return b
+}
+
 func runCommand(command string) {
 	var err error
 
@@ -854,7 +898,7 @@ func runCommand(command string) {
 		}
 		hash, err := hashInfo(data)
 		check(err)
-		conn, peer_id, err := bpHandshake(hash, os.Args[3])
+		conn, peer_id, err := bpHandshake(os.Args[3], bpHandshakeMsg(hash))
 		defer conn.Close()
 		check(err)
 		fmt.Printf("Peer ID: %x\n", peer_id)
@@ -868,7 +912,7 @@ func runCommand(command string) {
 		d := extractData(data)
 		check(err)
 		peers := getPeers(data)
-		conn, _, err := bpHandshake(hash, peers[0])
+		conn, _, err := bpHandshake(peers[0], bpHandshakeMsg(hash))
 		defer conn.Close()
 		check(err)
 
@@ -893,6 +937,20 @@ func runCommand(command string) {
 		if s, ok := data["info hash"]; ok {
 			fmt.Println("Info Hash:", s)
 		}
+	case "magnet_handshake":
+		magLink := os.Args[2]
+		data := parseMagnetLink(magLink)
+		hash, err := hex.DecodeString(data["info hash"])
+		check(err)
+
+		largeLeft := 1 << 30 // 1GB
+		p, err := trackerGetReq(data["announce"], hash, largeLeft)
+		check(err)
+		peers := parsePeers(p)
+		conn, peer_id, err := bpHandshake(peers[0], bpHandshakeMsgExt(hash))
+		defer conn.Close()
+		check(err)
+		fmt.Printf("Peer ID: %x \n", peer_id)
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
