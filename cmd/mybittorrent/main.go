@@ -231,7 +231,7 @@ func isValidBencodeCharacter(ch byte) bool {
 
 func check(e error) {
 	if e != nil {
-		panic(e)
+		log.Fatal(e)
 	}
 }
 
@@ -426,6 +426,7 @@ func getPeers(data []byte) []string {
 }
 
 func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
+
 	conn, err := net.Dial("tcp", socket)
 	if err != nil {
 		return nil, nil, err
@@ -445,7 +446,9 @@ func bpHandshake(hash []byte, socket string) (net.Conn, []byte, error) {
 	if n != 68 {
 		return nil, nil, fmt.Errorf("unexpected handshake size")
 	}
+	fmt.Println("successfull handshake with peer")
 	peer_id := buf[48:]
+
 	return conn, peer_id, nil
 }
 
@@ -466,8 +469,8 @@ func bpHandshakeMsg(hash []byte) (b []byte) {
 func rcvPeerMsg(conn net.Conn) ([]byte, error) {
 	var err error
 	size := make([]byte, 4)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Increase timeout to 10 seconds
-	n, err := conn.Read(size)                             // read the payload + msg id length
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) // Increase timeout to 5 seconds
+	n, err := conn.Read(size)                              // read the payload + msg id length
 	fmt.Println("bytes read:", n, "content:", size)
 	if err != nil {
 		fmt.Println("error reading payload + msg id length:", err)
@@ -483,9 +486,65 @@ func rcvPeerMsg(conn net.Conn) ([]byte, error) {
 	}
 
 	msgID := buf[0] // The first byte is the message ID
-	fmt.Printf("Received message: msgID=%d, length=%d\n", msgID, length)
+	fmt.Printf("Received message: msgID=%d, length=%d\n", msgID, len(buf))
 
 	return buf, nil
+}
+
+func initiate(conn net.Conn) error {
+	// receive bitfield message
+
+	buf, err := rcvPeerMsg(conn)
+	if err != nil {
+		fmt.Println("failed to retrieve bitfield message")
+		return err
+	}
+	if buf[0] != 5 { // Check if the message ID is 5 (bitfield)
+		return fmt.Errorf("expected bitfield message 5, got %d", buf[0])
+	}
+	fmt.Println("Received bitfield from peer")
+	// ignoring bitfield msg payload for now
+	err = sendPeerMsg(conn, 2, 0, 0, 0) // 2 for interested
+	if err != nil {
+		return err
+	}
+
+	buf, err = rcvPeerMsg(conn)
+	if err != nil {
+		return err
+	}
+	if buf[0] == 0 { // Choke message
+		fmt.Println("Peer choked us. Retrying...")
+		retries := 3
+		for retries > 0 {
+			// Send interested message again
+			err := sendPeerMsg(conn, 2, 0, 0, 0) // 2 for interested
+			if err != nil {
+				return err
+			}
+
+			// Wait for unchoke message
+			buf, err := rcvPeerMsg(conn)
+			if err != nil {
+				retries--
+				fmt.Println("Trying to receive unchoke message...")
+				time.Sleep(2 * time.Second) // Give some delay before retrying
+				continue
+			}
+
+			if buf[0] == 1 { // Unchoke message received
+				break
+			} else {
+				return fmt.Errorf("expected unchoke message 1, got %d", buf[0])
+			}
+		}
+
+		if retries == 0 {
+			return fmt.Errorf("failed to receive unchoke message after retries")
+		}
+
+	}
+	return nil
 }
 
 func sendPeerMsg(conn net.Conn, msgID byte, pieceIdx, blockOffset, blockLength uint32) error {
@@ -515,6 +574,8 @@ func sendPeerMsg(conn net.Conn, msgID byte, pieceIdx, blockOffset, blockLength u
 		fmt.Printf("Full message: %x\n", msg)
 	} else {
 		msg = append(size, msgId...)
+		fmt.Printf("Sending request: msgID=%d, pieceIdx=%d, blockOffset=%d, blockLength=%d\n", msgID, pieceIdx, blockOffset, blockLength)
+		fmt.Printf("Full message: %x\n", msg)
 	}
 
 	n, err := conn.Write(msg)
@@ -527,31 +588,6 @@ func sendPeerMsg(conn net.Conn, msgID byte, pieceIdx, blockOffset, blockLength u
 
 func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]byte, error) {
 	pieceIdx := uint32(pieceIndex)
-	// receive bitfield message
-	buf, err := rcvPeerMsg(conn)
-	if err != nil {
-		return nil, err
-	}
-	if buf[0] != 5 { // Check if the message ID is 5 (bitfield)
-		return nil, fmt.Errorf("expected bitfield message 5, got %d", buf[0])
-	}
-
-	// ignoring bitfield msg payload for now
-
-	// sending interested message
-	err = sendPeerMsg(conn, 2, pieceIdx, 0, 0) // 2 for interested
-	if err != nil {
-		return nil, err
-	}
-
-	// receive unchoke message
-	buf, err = rcvPeerMsg(conn)
-	if err != nil {
-		return nil, err
-	}
-	if buf[0] != 1 { // Check if the message ID is 1
-		return nil, fmt.Errorf("expected unchoke message 1, got %d", buf[0])
-	}
 
 	// send request mesasage for each blocks. dividing the piece into blocks of 16 kiB
 	info := d["info"].(map[string]interface{})
@@ -561,67 +597,213 @@ func downloadPiece(conn net.Conn, d map[string]interface{}, pieceIndex int) ([]b
 	x := 1
 	x = x << 14 // 16 kiB / 2^14
 
-	if pieceIndex == length/pieceLen { // TODO: figure out how and why this worked :)
+	if pieceIndex == length/pieceLen { // in case the actual piece length is smaller than what is defined in the torrent file
 		pieceLen = length % pieceLen
 	}
+
 	totalBLocks := pieceLen / x
 	if pieceLen%x != 0 {
 		totalBLocks++
 	}
+	blockLength := uint32(x) // 16 kiB
 
-	fmt.Println("total blocks:", totalBLocks, "file len:", length, "piece len actual:", pieceLen, "piecelen%x", pieceLen%x)
-	blockLength := uint32(x)
+	fmt.Println("total blocks:", totalBLocks, "file len:", length, "actual piece len:", pieceLen, "piecelen%x", pieceLen%x, "block len", blockLength)
+
 	var piece []byte
 	var blockOffset uint32
-	for i := 0; i < totalBLocks; i++ {
-		if i == totalBLocks-1 && pieceLen%x != 0 {
-			blockLength = uint32(pieceLen % x)
-		}
-		fmt.Println("iteration ", i, "blockOffset:", blockOffset)
-		err = sendPeerMsg(conn, 6, pieceIdx, blockOffset, blockLength) // 6 for request
-		if err != nil {
-			return nil, err
-		}
 
-		buf, err := rcvPeerMsg(conn)
-		if err != nil {
-			fmt.Println("Error receiving message:", err)
-			return nil, err
-		}
-
-		// Ensure that buf has enough data before accessing its contents
-		if len(buf) < 1+4+4 {
-			return nil, fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4, len(buf))
-		}
-		if buf[0] != 7 { // Check if the message ID is 7
-			return nil, fmt.Errorf("expected piece message 7, got %d", buf[0])
-		}
-		if blockLength != uint32(len(buf[1+4+4:])) {
-			return nil, fmt.Errorf("block size received %d does not match the expected size %d", len(buf[1+4+4:]), blockLength)
-		}
-		piece = append(piece, buf[1+4+4:]...)
-		blockOffset += uint32(x)
+	type blockData struct {
+		index int    // Block index
+		data  []byte // Block data
 	}
+	// pipelining requests with goroutines
+	maxInFlightRequests := 5
+	inFlight := 0
+	receivedBlocks := make(map[int][]byte)
+	blockRequests := make(chan int, maxInFlightRequests)
+	blockResponses := make(chan blockData)
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	expectedBlockIndices := make(map[uint32]bool)
+
+	// send requests using goroutines
+	go func() {
+		for blockIndex := 0; blockIndex < totalBLocks; blockIndex++ {
+			blockRequests <- blockIndex
+			expectedBlockIndices[uint32(blockIndex)] = true // Track the sent block
+		}
+		close(blockRequests)
+	}()
+
+	// receive responses using goroutines
+	go func() {
+		for i := 0; i < totalBLocks; i++ {
+			buf, err := rcvPeerMsg(conn) // buf contains the peer's response
+			if err != nil {
+				errCh <- err
+			}
+			begin := binary.BigEndian.Uint32(buf[5:9]) // 'begin' is the block offset
+			// Calculate the block index from the block offset
+			blockIndex := int(begin / blockLength) // Calculate the block index from the offset
+			if !expectedBlockIndices[uint32(blockIndex)] {
+				errCh <- fmt.Errorf("received unexpected block: %d", blockIndex)
+				return
+			}
+
+			blockPayload := buf[9:] // The actual block data starts after the 'begin' field
+			// Ensure that buf has enough data before accessing its contents
+			var expectedSize uint32
+			if blockIndex == totalBLocks-1 && pieceLen%int(blockLength) != 0 {
+				expectedSize = uint32(pieceLen) % blockLength // Adjust size for the last block
+			} else {
+				expectedSize = blockLength // For all other blocks, it should be 16 KiB
+			}
+
+			if len(buf) < 9 {
+				errCh <- fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4, len(buf))
+			}
+			if buf[0] != 7 { // Check if the message ID is 7
+				errCh <- fmt.Errorf("expected piece message 7, got %d", buf[0])
+			}
+			if uint32(len(buf[9:])) != expectedSize {
+				errCh <- fmt.Errorf("block size received %d does not match the expected size %d", len(buf[9:]), expectedSize)
+			}
+			blockResponses <- blockData{index: blockIndex, data: blockPayload}
+		}
+		close(done)
+	}()
+
+loop:
+	for inFlight < maxInFlightRequests || len(receivedBlocks) < totalBLocks {
+		select {
+		case blockIndex, ok := <-blockRequests:
+			if !ok {
+				// This means blockRequests channel is closed
+				continue
+			}
+			fmt.Println("block index:", blockIndex)
+			blockOffset = uint32(blockIndex) * blockLength // Correct offset
+			size := blockLength
+			if blockIndex == totalBLocks-1 && pieceLen%int(blockLength) != 0 {
+				size = uint32(pieceLen) % blockLength
+			}
+			sendPeerMsg(conn, 6, pieceIdx, blockOffset, size)
+			inFlight++
+		case response := <-blockResponses:
+			inFlight--
+			receivedBlocks[response.index] = response.data
+			fmt.Println("appending index:", response.index)
+		case err := <-errCh:
+			return nil, err
+		case <-done:
+			break loop
+		}
+	}
+
+	for i := 0; i < totalBLocks; i++ {
+		piece = append(piece, receivedBlocks[i]...)
+	}
+
+	// below is my previous implementation without pipelining request
+	/*
+		for i := 0; i < totalBLocks; i++ {
+			if i == totalBLocks-1 && pieceLen%x != 0 {
+				blockLength = uint32(pieceLen % x)
+			}
+			fmt.Println("iteration ", i, "blockOffset:", blockOffset)
+			err = sendPeerMsg(conn, 6, pieceIdx, blockOffset, blockLength) // 6 for request
+			if err != nil {
+				return nil, err
+			}
+
+			buf, err := rcvPeerMsg(conn)
+			if err != nil {
+				fmt.Println("Error receiving message:", err)
+				return nil, err
+			}
+
+			// Ensure that buf has enough data before accessing its contents
+			if len(buf) < 1+4+4 {
+				return nil, fmt.Errorf("received incomplete piece message, expected at least %d bytes, got %d", 1+4+4, len(buf))
+			}
+			if buf[0] != 7 { // Check if the message ID is 7
+				return nil, fmt.Errorf("expected piece message 7, got %d", buf[0])
+			}
+			if blockLength != uint32(len(buf[1+4+4:])) {
+				return nil, fmt.Errorf("block size received %d does not match the expected size %d", len(buf[1+4+4:]), blockLength)
+			}
+			piece = append(piece, buf[1+4+4:]...)
+			blockOffset += blockLength
+		}
+	*/
 
 	fmt.Println("piece length:", len(piece))
 	// check piece integrity
 	hash := info["pieces"].([]byte)
+
+	if ok, err := checkPieceHash(hash, piece, pieceIndex); !ok {
+		return nil, err
+	}
+	return piece, nil
+}
+func checkPieceHash(hash []byte, piece []byte, pieceIndex int) (bool, error) {
 	hashStart := pieceIndex * 20
 	hashEnd := hashStart + 20
 
 	if hashEnd > len(hash) {
-		return nil, fmt.Errorf("piece index is out of range for the hash data")
+		return false, fmt.Errorf("piece index is out of range for the hash data")
 	}
 	h := sha1.New()
 	h.Write(piece)
 	newHash := h.Sum(nil)
-
 	if !bytes.Equal(newHash, hash[hashStart:hashEnd]) {
-		return nil, fmt.Errorf("piece integrity is compromised")
-	} else {
-		fmt.Println("Hash matches")
+		return false, fmt.Errorf("piece %d's integrity is compromised", pieceIndex)
 	}
-	return piece, nil
+	fmt.Printf("Piece %d's hash matches\n", pieceIndex)
+	return true, nil
+}
+
+func createFile(piece []byte, filename string) {
+	f, err := os.Create(filename)
+	check(err)
+	defer f.Close()
+	_, err = f.Write(piece)
+	check(err)
+	fmt.Println("File Created:", filename)
+}
+
+func downloadFile(data []byte) (pieces []byte, err error) {
+	peers := getPeers(data)
+	d := extractData(data)
+	infoHash, err := hashInfo(data)
+	conn, _, err := bpHandshake(infoHash, peers[0]) // use 1 peer for now
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	err = initiate(conn)
+	if err != nil {
+		return nil, err
+	}
+	info := d["info"].(map[string]interface{})
+	length := info["length"].(int)
+	pieceLen := info["piece length"].(int)
+	fmt.Println("piece length from torrent file:", pieceLen)
+
+	totalPiece := length / pieceLen
+	if length%pieceLen != 0 {
+		totalPiece++
+	}
+	for pieceIdx := 0; pieceIdx < totalPiece; pieceIdx++ {
+		fmt.Printf("\ndownloading piece %d...\n", pieceIdx)
+		p, err := downloadPiece(conn, d, pieceIdx)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("\nappending piece %d...\n", pieceIdx)
+		pieces = append(pieces, p...)
+	}
+	return pieces, err
 }
 
 func runCommand(command string) {
@@ -671,17 +853,19 @@ func runCommand(command string) {
 		conn, _, err := bpHandshake(hash, peers[0])
 		defer conn.Close()
 		check(err)
+
 		pieceIdx, err := strconv.Atoi(os.Args[5])
+		check(err)
+		err = initiate(conn)
 		check(err)
 		piece, err := downloadPiece(conn, d, pieceIdx)
 		check(err)
-		f, err := os.Create(os.Args[3])
+		createFile(piece, os.Args[3])
+	case "download":
+		data := readFile(os.Args[4])
+		pieces, err := downloadFile(data)
 		check(err)
-		defer f.Close()
-		_, err = f.Write(piece)
-		check(err)
-		f.Sync()
-
+		createFile(pieces, os.Args[3])
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
@@ -690,7 +874,7 @@ func runCommand(command string) {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: (decode/info/peers/handshake/download_piece) <string> ...")
+		fmt.Println("Usage: (decode/info/peers/handshake/download_piece/download) <string> ...")
 		return
 	}
 	command := os.Args[1]
