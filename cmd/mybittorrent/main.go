@@ -329,11 +329,14 @@ func decodeInfo(data []byte) error {
 	check(err)
 	fmt.Printf("Info Hash: %x", hash)
 	fmt.Println("")
-
-	fmt.Print("Piece Length: ", info["piece length"])
-	fmt.Println("")
-	fmt.Printf("Piece Hashes: %x", info["pieces"])
-	fmt.Println("")
+	if s, ok := info["piece length"]; ok {
+		fmt.Print("Piece Length: ", s)
+		fmt.Println("")
+	}
+	if s, ok := info["pieces"]; ok {
+		fmt.Printf("Piece Hashes: %x", s)
+		fmt.Println("")
+	}
 	return nil
 }
 
@@ -806,6 +809,21 @@ func downloadFile(data []byte) (pieces []byte, err error) {
 	return pieces, err
 }
 
+func parseMagnetLink(s string) map[string]string {
+	data := make(map[string]string, 0)
+
+	sp := strings.Split(s, "&")
+	// fmt.Println(sp)
+	data["info hash"] = sp[0][20:]
+	// fmt.Println(data["info hash"])
+	url, err := url.PathUnescape(sp[2][3:])
+	if err != nil {
+		check(err)
+	}
+	data["announce"] = url
+	// fmt.Println(data["announce"])
+	return data
+}
 func runCommand(command string) {
 	var err error
 
@@ -866,6 +884,15 @@ func runCommand(command string) {
 		pieces, err := downloadFile(data)
 		check(err)
 		createFile(pieces, os.Args[3])
+	case "magnet_parse":
+		magLink := os.Args[2]
+		data := parseMagnetLink(magLink)
+		if s, ok := data["announce"]; ok {
+			fmt.Println("Tracker URL:", s)
+		}
+		if s, ok := data["info hash"]; ok {
+			fmt.Println("Info Hash:", s)
+		}
 	default:
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
